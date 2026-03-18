@@ -1,85 +1,78 @@
 import requests
 import time
 from datetime import datetime
+import pandas as pd
 
-import os
+from db import init_db, salvar, conn
+from analysis import variacao, prever
 
-TOKEN = os.environ.get("TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-
-NIVEIS = [1, 2, 3]  # percentuais para alerta
-
-def get_cotacao():
-    url = "https://economia.awesomeapi.com.br/json/last/USD-BRL,EUR-BRL"
-    r = requests.get(url)
-    data = r.json()
-    usd = float(data["USDBRL"]["bid"])
-    eur = float(data["EURBRL"]["bid"])
-    return usd, eur
+# CONFIG
+TOKEN = "SEU_TOKEN"
+CHAT_ID = "SEU_CHAT_ID"
 
 def enviar(msg):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
+def get_cotacao():
+    url = "https://economia.awesomeapi.com.br/json/last/USD-BRL,EUR-BRL"
+    r = requests.get(url)
+    data = r.json()
+
+    usd = float(data["USDBRL"]["bid"])
+    eur = float(data["EURBRL"]["bid"])
+
+    return usd, eur
+
+init_db()
+
 usd_inicio = None
 eur_inicio = None
+dia = datetime.now().day
 
-alertas_usd_enviados = set()
-alertas_eur_enviados = set()
-
-dia_atual = datetime.now().day
-
-print("🚀 Agente PRO de câmbio iniciado...")
+print("🚀 Sistema de câmbio iniciado...")
 
 while True:
     try:
-        agora = datetime.now()
+        now = datetime.now()
 
-        # 🔄 Novo dia → reset
-        if agora.day != dia_atual:
+        # reset diário
+        if now.day != dia:
             usd_inicio = None
             eur_inicio = None
-            alertas_usd_enviados.clear()
-            alertas_eur_enviados.clear()
-            dia_atual = agora.day
-            print("🔄 Novo dia iniciado.")
+            dia = now.day
 
         usd, eur = get_cotacao()
 
+        salvar("USD", usd)
+        salvar("EUR", eur)
+
+        # define início do dia
         if usd_inicio is None:
             usd_inicio = usd
             eur_inicio = eur
-            print(f"📌 Início do dia - USD: {usd_inicio} | EUR: {eur_inicio}")
 
-        variacao_usd = ((usd - usd_inicio) / usd_inicio) * 100
-        variacao_eur = ((eur - eur_inicio) / eur_inicio) * 100
+        var_usd = variacao(usd_inicio, usd)
+        var_eur = variacao(eur_inicio, eur)
 
-        print(f"{agora} | USD: {usd} ({variacao_usd:.2f}%) | EUR: {eur} ({variacao_eur:.2f}%)")
+        print(f"{now} | USD: {usd} ({var_usd:.2f}%) | EUR: {eur} ({var_eur:.2f}%)")
 
-        # 📈📉 Verifica níveis
-        for nivel in NIVEIS:
-            # Alta USD
-            if variacao_usd >= nivel and f"+{nivel}" not in alertas_usd_enviados:
-                enviar(f"📈 Dólar subiu +{nivel}% hoje!\nAtual: R$ {usd}\nVariação: {variacao_usd:.2f}%")
-                alertas_usd_enviados.add(f"+{nivel}")
+        # ALERTA ±3%
+        if abs(var_usd) >= 3:
+            enviar(f"🚨 USD variou {var_usd:.2f}% hoje\nValor: R$ {usd}")
 
-            # Queda USD
-            if variacao_usd <= -nivel and f"-{nivel}" not in alertas_usd_enviados:
-                enviar(f"📉 Dólar caiu -{nivel}% hoje!\nAtual: R$ {usd}\nVariação: {variacao_usd:.2f}%")
-                alertas_usd_enviados.add(f"-{nivel}")
+        if abs(var_eur) >= 3:
+            enviar(f"🚨 EUR variou {var_eur:.2f}% hoje\nValor: R$ {eur}")
 
-            # Alta EUR
-            if variacao_eur >= nivel and f"+{nivel}" not in alertas_eur_enviados:
-                enviar(f"📈 Euro subiu +{nivel}% hoje!\nAtual: R$ {eur}\nVariação: {variacao_eur:.2f}%")
-                alertas_eur_enviados.add(f"+{nivel}")
+        # PROJEÇÃO
+        df = pd.read_sql("SELECT * FROM cotacoes WHERE moeda='USD'", conn)
+        prev = prever(df)
 
-            # Queda EUR
-            if variacao_eur <= -nivel and f"-{nivel}" not in alertas_eur_enviados:
-                enviar(f"📉 Euro caiu -{nivel}% hoje!\nAtual: R$ {eur}\nVariação: {variacao_eur:.2f}%")
-                alertas_eur_enviados.add(f"-{nivel}")
+        if prev:
+            enviar(f"📊 Projeção USD:\nDia1: {prev[0]:.2f}\nDia2: {prev[1]:.2f}")
 
-        time.sleep(60)
+        time.sleep(300)
 
     except Exception as e:
         print("Erro:", e)
-        time.sleep(30)
+        time.sleep(60)
